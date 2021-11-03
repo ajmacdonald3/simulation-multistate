@@ -1,0 +1,668 @@
+---
+title: "Red Knot seasonal survival simulation"
+author: "Amie MacDonald"
+date: "15/01/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Data simulation
+
+Simulate multistate encounter histories following Kery and Schaub (2012). To approximate a biologically realistic scenario simulate data as follows:
+
+
+1. Occasions: simulate data over 5 years and divide years into pre-breeding, post-breeding, and non-breeding seasons, resulting in 15 occasions (*t*).
+
+2. States: define 6 possible states: Delaware Bay (DB), James Bay (JB), Mingan (MI), Argentina (AR), unobservable (UN), and dead. There are 5 possible observable states: DB, JB, MI, AR, and "not seen" since observers would be unable to distinguish between unobservable and dead.
+
+3. Survival: set survival as constant for each state.
+
+4. Resighting: set resighting rate so that it varies over time, but set occasions where observers would not be present to 0 (i.e. James Bay in the pre-breeding season since fieldwork only occurs there in the post-breeding season).
+
+5. Transitions: set transitions to be constant, but only to occur in seasons where it is biologically realistic (i.e. birds can transition from Argentina to Delaware Bay from the non-breeding to pre-breeding season, but not in other seasons. Similarly, birds can never transition from Delaware Bay to Argentina because they would have to pass through a post-breeding state first - this could be James Bay or Mingan or it could be the unobservable state).
+
+```{r, eval = FALSE}
+
+# load packages
+library(rjags)
+library(jagsUI)
+
+# set seed so simulation is replicable
+set.seed(42)
+
+# Define  number of occasions, states, states distinguishable by observers
+n.occasions <- 15
+n.states <- 6
+n.obs <- 5
+
+# define survival for each state
+phiDB <- 0.97
+phiJB <- 0.89
+phiMI <- 0.89
+phiAR <- 0.93
+phiUN <- 0.92
+
+# define resighting probabilities for each state at each occasion
+pDB <- c(0, 0, 0.5, 0, 0, 0.6, 0, 0, 0.7, 0, 0, 0.6, 0, 0)
+pJB <- c(0, 0, 0, 0.6, 0, 0, 0.4, 0, 0, 0.7, 0, 0, 0.6, 0)
+pMI <- c(0.5, 0, 0, 0.4, 0, 0, 0.8, 0, 0, 0.6, 0, 0, 0.3, 0)
+pAR <- c(0, 0.4, 0, 0, 0.8, 0, 0, 0.5, 0, 0, 0.3, 0, 0, 0.5)
+
+# define transition probabilities for each state to each other state at each occasion
+psiDB.DB <- rep(0, n.occasions)
+psiDB.JB <- rep(c(0.4, 0, 0), n.occasions/3)
+psiDB.MI <- rep(c(0.4, 0, 0), n.occasions/3)
+psiDB.AR <- rep(0, n.occasions)
+
+psiJB.DB <- rep(0, n.occasions)
+psiJB.JB <- rep(0, n.occasions)
+psiJB.MI <- rep(0, n.occasions)
+psiJB.AR <- rep(c(0, 0.7, 0), n.occasions/3)
+
+psiMI.DB <- rep(0, n.occasions)
+psiMI.JB <- rep(0, n.occasions)
+psiMI.MI <- rep(0, n.occasions)
+psiMI.AR <- rep(c(0, 0.6, 0), n.occasions/3)
+
+psiAR.DB <- rep(c(0, 0, 0.8), n.occasions/3)
+psiAR.JB <- rep(0, n.occasions)
+psiAR.MI <- rep(0, n.occasions)
+psiAR.AR <- rep(0, n.occasions)
+
+psiUN.DB <- rep(c(0, 0, 0.8), n.occasions/3)
+psiUN.JB <- rep(c(0.4, 0, 0), n.occasions/3)
+psiUN.MI <- rep(c(0.4, 0, 0), n.occasions/3)
+psiUN.AR <- rep(c(0, 0.7, 0), n.occasions/3)
+
+```
+
+Next define the number of marked individuals released at each occasion. More birds were banded at Delaware Bay, fewer were banded in Mingan and Argentina and none were banded at James Bay. Will have to increase these numbers for full simulation with more states and occasions. Then define the state transition and observation process matrices. 
+
+### State transition matrix
+
+
+$$\left[\begin{array}
+{rrrrrr}
+0 & \phi_{DB}\psi_{DB.JB,t} &  \phi_{DB}\psi_{DB.MI,t} & 0 & \phi_{DB}(1-\psi_{DB.JB,t}-\psi_{DB.MI,t}) & 1-\phi_{DB}\\
+0 & 0 & 0 & \phi_{JB}\psi_{JB.AR,t} &  \phi_{JB}(1-\psi_{JB.AR,t}) & 1-\phi_{JB}\\
+0 & 0 & 0 & \phi_{MI}\psi_{MI.AR,t} &  \phi_{MI}(1-\psi_{MI.AR,t}) & 1-\phi_{MI}\\
+\phi_{AR}\psi_{AR.DB,t} & 0 & 0 & 0 &  \phi_{AR}(1-\psi_{AR.DB,t}) & 1-\phi_{AR}\\
+\phi_{UN}\psi_{UN.DB,t} & \phi_{UN}\psi_{UN.JB,t} &  \phi_{UN}\psi_{UN.MI,t} & \phi_{UN}\psi_{UN.AR,t} & \phi_{UN}(1-\psi_{UN.DB,t}-\psi_{UN.JB,t}-\psi_{UN.MI,t}-\psi_{UN.AR,t}) & 1-\phi_{UN}\\
+0 & 0 & 0 & 0 & 0 & 1
+\end{array}\right]
+$$
+
+
+### Observation matrix
+
+
+$$\left[\begin{array}
+{rrrrrr}
+p_{DB,t} & 0 & 0 & 0 & 1-p_{DB,t}\\
+0 & p_{JB,t} & 0 & 0 & 1-p_{JB,t}\\
+0 & 0 & p_{MI,t} & 0 & 1-p_{MI,t}\\
+0 & 0 & 0 & p_{AR,t} & 1-p_{AR,t}\\
+0 & 0 & 0 & 0 & 1\\
+0 & 0 & 0 & 0 & 1\\
+\end{array}\right]
+$$
+
+
+```{r, eval = FALSE}
+
+# released individuals
+marked <- matrix(NA, ncol = n.states, nrow = n.occasions)
+marked[,1] <- rep(c(100, 0, 0), n.occasions/3)
+marked[,2] <- rep(0, n.occasions)
+marked[,3] <- rep(c(0, 20, 0), n.occasions/3)
+marked[,4] <- rep(c(0, 0, 20), n.occasions/3)
+marked[,5] <- rep(0, n.occasions)
+marked[,6] <- rep(0, n.occasions)
+
+# Define matrices with survival, transition and recapture probabilities
+# These are 4-dimensional matrices, with 
+# Dimension 1: state of departure
+# Dimension 2: state of arrival
+# Dimension 3: individual
+# Dimension 4: time
+# 1. State process matrix
+totrel <- sum(marked)*(n.occasions-1)
+PSI.STATE <- array(NA, dim=c(n.states, n.states, totrel, n.occasions-1))
+for (i in 1:totrel){
+  for (t in 1:(n.occasions-1)){
+    PSI.STATE[,,i,t] <- matrix(c(
+      phiDB*psiDB.DB[t], phiDB*psiDB.JB[t], phiDB*psiDB.MI[t], phiDB*psiDB.AR[t], phiDB*(1-psiDB.JB[t]-psiDB.MI[t]),                         1-phiDB,
+      phiJB*psiJB.DB[t], phiJB*psiJB.JB[t], phiJB*psiJB.MI[t], phiJB*psiJB.AR[t], phiJB*(1-psiJB.AR[t]),                                     1-phiJB,
+      phiMI*psiMI.DB[t], phiMI*psiMI.JB[t], phiMI*psiMI.MI[t], phiMI*psiMI.AR[t], phiMI*(1-psiMI.AR[t]),                                     1-phiMI,
+      phiAR*psiAR.DB[t], phiAR*psiAR.JB[t], phiAR*psiAR.MI[t], phiAR*psiAR.AR[t], phiAR*(1-psiAR.DB[t]),                                     1-phiAR,
+      phiUN*psiUN.DB[t], phiUN*psiUN.JB[t], phiUN*psiUN.MI[t], phiUN*psiUN.AR[t], phiUN*(1-psiUN.DB[t]-psiUN.JB[t]-psiUN.MI[t]-psiUN.AR[t]), 1-phiUN,
+      0,                 0,                 0,                 0,                 0,                                                         1),
+      nrow = n.states, byrow = TRUE)
+  } #t
+} #i
+
+# 2.Observation process matrix
+PSI.OBS <- array(NA, dim=c(n.states, n.obs, totrel, n.occasions-1))
+for (i in 1:totrel){
+  for (t in 1:(n.occasions-1)){
+    PSI.OBS[,,i,t] <- matrix(c(
+      pDB[t], 0,      0,      0,      1-pDB[t],
+      0,      pJB[t], 0,      0,      1-pJB[t],
+      0,      0,      pMI[t], 0,      1-pMI[t],
+      0,      0,      0,      pAR[t], 1-pAR[t],
+      0,      0,      0,      0,      1,
+      0,      0,      0,      0,      1),
+      nrow = n.states, byrow = TRUE)
+  } #t
+} #i
+
+```
+
+Use functions from Kery and Schaub (2012) to simulate encounter histories and occasions of first encounter based on the parameters defined above.
+
+```{r, eval = FALSE}
+
+# Define function to simulate multistate capture-recapture data
+simul.ms <- function(PSI.STATE, PSI.OBS, marked, unobservable = NA){
+  # Unobservable: number of state that is unobservable
+  n.occasions <- dim(PSI.STATE)[4] + 1
+  CH <- CH.TRUE <- matrix(NA, ncol = n.occasions, nrow = sum(marked))
+  # Define a vector with the occasion of marking
+  mark.occ <- matrix(0, ncol = dim(PSI.STATE)[1], nrow = sum(marked))
+  g <- colSums(marked)
+  for (s in 1:dim(PSI.STATE)[1]){
+    if (g[s]==0) next  # To avoid error message if nothing to replace
+    mark.occ[(cumsum(g[1:s])-g[s]+1)[s]:cumsum(g[1:s])[s],s] <-
+      rep(1:n.occasions, marked[1:n.occasions,s])
+  } #s
+  for (i in 1:sum(marked)){
+    for (s in 1:dim(PSI.STATE)[1]){
+      if (mark.occ[i,s]==0) next
+      first <- mark.occ[i,s]
+      CH[i,first] <- s
+      CH.TRUE[i,first] <- s
+    } #s
+    for (t in (first+1):n.occasions){
+      # Multinomial trials for state transitions
+      if (first==n.occasions) next
+      state <- which(rmultinom(1, 1, PSI.STATE[CH.TRUE[i,t-1],,i,t-1])==1)
+      CH.TRUE[i,t] <- state
+      # Multinomial trials for observation process
+      event <- which(rmultinom(1, 1, PSI.OBS[CH.TRUE[i,t],,i,t-1])==1)
+      CH[i,t] <- event
+    } #t
+  } #i
+  # Replace the NA and the highest state number (dead) in the file by 0
+  CH[is.na(CH)] <- 0
+  CH[CH==dim(PSI.STATE)[1]] <- 0
+  CH[CH==unobservable] <- 0
+  id <- numeric(0)
+  for (i in 1:dim(CH)[1]){
+    z <- min(which(CH[i,]!=0))
+    ifelse(z==dim(CH)[2], id <- c(id,i), id <- c(id))
+  }
+  return(list(CH=CH[-id,], CH.TRUE=CH.TRUE[-id,]))
+  # CH: capture histories to be used
+  # CH.TRUE: capture histories with perfect observation
+}
+
+# Execute simulation function and get encounter history (and encounter history if observation was perfect)
+sim <- simul.ms(PSI.STATE, PSI.OBS, marked, unobservable = 5)
+CH <- sim$CH
+CH.TRUE <- sim$CH.TRUE
+
+# Compute vector with occasions of first capture
+get.first <- function(x) min(which(x!=0))
+f <- apply(CH, 1, get.first)
+
+# Recode CH matrix: note, a 0 is not allowed in WinBUGS!
+# 1 = seen alive in DB, 2 = seen alive in JB, 3 = seen alive in MI, 4 = seen alive in AR, 5 = not seen
+rCH <- CH  # Recoded CH
+rCH[rCH==0] <- 5
+
+```
+
+The data simulation worked as intended if observations only occur in:
+
+* DB on occasions 1, 4, 7, 10, 13
+* JB on occasions 2, 5, 8, 11, 14
+* MI on occasions 2, 5, 8, 11, 14
+* AR on occasions 3, 6, 9, 12, 15
+* not seen on any occasion
+
+## Model description
+
+Then specify the model in JAGS code. Constrain the parameters as follows where *s* = state and *t* = occasion:
+
+
+1. *phi*: held constant for each state
+
+$\phi_{s,t} = \lambda_s$
+
+2. *p*: allowed to vary as temporal random effect for each state, occasions with no fieldwork at a state set to zero for that state
+
+$logit(p_{s,t}) = \mu_s + \epsilon_{s,t}$
+
+$\epsilon_{s,t} = Normal(0, \sigma^2_s)$
+
+3. *psi*: following annual cycle and time-dependent with biologically unrealistic transitions set to 0 (but only when that transition is always impossible (i.e. DB to AR in time *t* to *t+1*). When a transition is possible in some seasons---JB to AR is possible but only in post-breeding to non-breeding---a time-dependent parameter is estimated. Given the data it should estimate pretty much 0 for the other seasons. Could look into fixing these at zero to further reduce number of parameters estimated and reduce complexity/computation time). Currently using a multinomial logit link function to constrain them to the (0, 1) interval and so that probabilities for each state sum to 1.
+
+```{r, eval = FALSE}
+
+sink("simulation_scenarios.jags")
+cat("
+model {
+
+# -------------------------------------------------
+# Parameters:
+# phiDB: survival probability at Delaware Bay
+# phiJB: survival probability at James Bay
+# phiMI: survival probability at Mingan
+# phiAR: survival probability in Argentina
+# phiUN: survival probability when unobservable
+
+# psiDB.JB: movement probability from Delaware Bay to James Bay
+# psiDB.MI: movement probability from Delaware Bay to Mingan
+# psiDB.UN: movement probability from Delaware Bay to unobservable state (1-psiDB.JB-psiDB.MI)
+# psiJB.AR: movement probability from James Bay to Argentina
+# psiJB.UN: movement probability from James Bay to unobservable state (1-psiJB.AR)
+# psiMI.AR: movement probability from Mingan to Argentina
+# psiMI.UN: movement probability from Mingan to unobservable state (1-psiMI.AR)
+# psiAR.DB: movement probability from Argentina to Delaware Bay
+# psiAR.UN: movement probability from Argentina to unobservable state (1-psiAR.DB)
+# psiUN.DB: movement probability from unobservable to Delaware Bay
+# psiUN.JB: movement probability from unobservable to James Bay
+# psiUN.MI: movement probability from unobservable to Mingan
+# psiUN.AR: movement probability from unobservable to Argentina
+# all other movement probabilities set to zero because not biologically plausible
+
+# pDB: resight probability at Delaware Bay
+# pJB: resight probability at James Bay
+# pMI: resight probability at Mingan
+# pAR: resight probability in Argentina
+# -------------------------------------------------
+# States (S):
+# 1 alive at Delaware Bay
+# 2 alive at James Bay
+# 3 alive at Mingan
+# 4 alive in Argentina
+# 5 alive but unobservable
+# 6 dead
+
+# Observations (O):
+# 1 seen at Delaware Bay 
+# 2 seen at James Bay
+# 3 seen at Mingan
+# 4 seen in Argentina
+# 5 not seen
+# -------------------------------------------------
+
+# Priors and constraints
+   # Survival and recapture: uniform
+   for (t in 1:(n.occasions-1)){
+   phiDB[t] <- mean.phi[1]
+   phiJB[t] <- mean.phi[2]
+   phiMI[t] <- mean.phi[3]
+   phiAR[t] <- mean.phi[4]
+   phiUN[t] <- mean.phi[5]
+   }
+   
+   for (u in 1:5){
+   mean.phi[u] ~ dunif(0, 1)
+   }
+   
+   pDB[1] <- 0
+   pDB[2] <- 0
+   pDB[3] <- ptDB[1]
+   pDB[4] <- 0
+   pDB[5] <- 0
+   pDB[6] <- ptDB[2]
+   pDB[7] <- 0
+   pDB[8] <- 0
+   pDB[9] <- ptDB[3]
+   pDB[10] <- 0
+   pDB[11] <- 0
+   pDB[12] <- ptDB[4]
+   pDB[13] <- 0
+   pDB[14] <- 0
+   
+   for (u in 1:4){
+   logit(ptDB[u]) <- muDB + epsilonDB[u]
+   epsilonDB[u] ~ dnorm(0, tauDB)T(-15, 15)
+   }
+  
+   muDB <- log(mean.pDB / (1-mean.pDB))     # Logit transformation
+   mean.pDB ~ dunif(0, 1)                   # Prior for mean survival
+   tauDB <- pow(sigmaDB, -2)
+   sigmaDB ~ dunif(0, 10)                   # Prior on standard deviation
+   sigma2DB <- pow(sigmaDB, 2)              # Temporal variance
+   
+   pJB[1] <- 0
+   pJB[2] <- 0
+   pJB[3] <- 0
+   pJB[4] <- ptJB[1]
+   pJB[5] <- 0
+   pJB[6] <- 0
+   pJB[7] <- ptJB[2]
+   pJB[8] <- 0
+   pJB[9] <- 0
+   pJB[10] <- ptJB[3]
+   pJB[11] <- 0
+   pJB[12] <- 0
+   pJB[13] <- ptJB[4]
+   pJB[14] <- 0
+   
+   for (u in 1:4){
+   logit(ptJB[u]) <- muJB + epsilonJB[u]
+   epsilonJB[u] ~ dnorm(0, tauJB)T(-15, 15)
+   }
+   
+   muJB <- log(mean.pJB / (1-mean.pJB))     # Logit transformation
+   mean.pJB ~ dunif(0, 1)                   # Prior for mean survival
+   tauJB <- pow(sigmaJB, -2)
+   sigmaJB ~ dunif(0, 10)                   # Prior on standard deviation
+   sigma2JB <- pow(sigmaJB, 2)              # Temporal variance
+   
+   pMI[1] <- ptMI[1]
+   pMI[2] <- 0
+   pMI[3] <- 0
+   pMI[4] <- ptMI[2]
+   pMI[5] <- 0
+   pMI[6] <- 0
+   pMI[7] <- ptMI[3]
+   pMI[8] <- 0
+   pMI[9] <- 0
+   pMI[10] <- ptMI[4]
+   pMI[11] <- 0
+   pMI[12] <- 0
+   pMI[13] <- ptMI[5]
+   pMI[14] <- 0
+   
+   for (u in 1:5){
+   logit(ptMI[u]) <- muMI + epsilonMI[u]
+   epsilonMI[u] ~ dnorm(0, tauMI)T(-15, 15)
+   }
+   
+   muMI <- log(mean.pMI / (1-mean.pMI))     # Logit transformation
+   mean.pMI ~ dunif(0, 1)                   # Prior for mean survival
+   tauMI <- pow(sigmaMI, -2)
+   sigmaMI ~ dunif(0, 10)                   # Prior on standard deviation
+   sigma2MI <- pow(sigmaMI, 2)              # Temporal variance
+   
+   pAR[1] <- 0
+   pAR[2] <- ptAR[1]
+   pAR[3] <- 0
+   pAR[4] <- 0
+   pAR[5] <- ptAR[2]
+   pAR[6] <- 0
+   pAR[7] <- 0
+   pAR[8] <- ptAR[3]
+   pAR[9] <- 0
+   pAR[10] <- 0
+   pAR[11] <- ptAR[4]
+   pAR[12] <- 0
+   pAR[13] <- 0
+   pAR[14] <- ptAR[5]
+   
+   for (u in 1:5){
+   logit(ptAR[u]) <- muAR + epsilonAR[u]
+   epsilonAR[u] ~ dnorm(0, tauAR)T(-15, 15)
+   }
+   
+   muAR <- log(mean.pAR / (1-mean.pAR))     # Logit transformation
+   mean.pAR ~ dunif(0, 1)                   # Prior for mean survival
+   tauAR <- pow(sigmaAR, -2)
+   sigmaAR ~ dunif(0, 10)                   # Prior on standard deviation
+   sigma2AR <- pow(sigmaAR, 2)              # Temporal variance
+
+   # Transitions: multinomial logit
+      # Normal priors on logit of all but one transition probs
+      for (i in 1:4){
+      for (t in 1:(n.occasions-1)){
+         lpsiDB[i,t] ~ dnorm(0, 0.001)
+         lpsiJB[i,t] ~ dnorm(0, 0.001)
+         lpsiMI[i,t] ~ dnorm(0, 0.001)
+         lpsiAR[i,t] ~ dnorm(0, 0.001)
+         lpsiUN[i,t] ~ dnorm(0, 0.001)
+      }
+      }
+
+      # Constrain the transitions such that their sum is < 1
+      for (t in 1:(n.occasions-1)){
+         psiDB[1,t] <- 0
+         psiDB[2,t] <- exp(lpsiDB[2,t]) /
+          (1 + exp(lpsiDB[1,t]) + exp(lpsiDB[2,t]) + exp(lpsiDB[3,t]) + exp(lpsiDB[4,t]))
+         psiDB[3,t] <- exp(lpsiDB[3,t]) /
+          (1 + exp(lpsiDB[1,t]) + exp(lpsiDB[2,t]) + exp(lpsiDB[3,t]) + exp(lpsiDB[4,t]))
+         psiDB[4,t] <- 0
+      }
+      
+      for (t in 1:(n.occasions-1)){
+         psiJB[1,t] <- 0
+         psiJB[2,t] <- 0
+         psiJB[3,t] <- 0
+         psiJB[4,t] <- exp(lpsiJB[4,t]) /
+          (1 + exp(lpsiJB[1,t]) + exp(lpsiJB[2,t]) + exp(lpsiJB[3,t]) + exp(lpsiJB[4,t]))
+      }
+      
+      for (t in 1:(n.occasions-1)){
+         psiMI[1,t] <- 0
+         psiMI[2,t] <- 0
+         psiMI[3,t] <- 0
+         psiMI[4,t] <- exp(lpsiMI[4,t]) / 
+          (1 + exp(lpsiMI[1,t]) + exp(lpsiMI[2,t]) + exp(lpsiMI[3,t]) + exp(lpsiMI[4,t]))
+      }
+      
+      for (t in 1:(n.occasions-1)){
+         psiAR[1,t] <- exp(lpsiAR[1,t]) / 
+          (1 + exp(lpsiAR[1,t]) + exp(lpsiAR[2,t]) + exp(lpsiAR[3,t]) + exp(lpsiAR[4,t]))
+         psiAR[2,t] <- 0
+         psiAR[3,t] <- 0
+         psiAR[4,t] <- 0
+      }
+      
+      for (i in 1:4){   
+      for (t in 1:(n.occasions-1)){   
+         psiUN[i,t] <- exp(lpsiUN[i,t]) / 
+          (1 + exp(lpsiUN[1,t]) + exp(lpsiUN[2,t]) + exp(lpsiUN[3,t]) + exp(lpsiUN[4,t]))
+      }
+      }
+      
+
+    # Calculate the last transition probability
+    for (t in 1:(n.occasions-1)){
+      psiDB[5,t] <- 1-psiDB[1,t]-psiDB[2,t]-psiDB[3,t]-psiDB[4,t]
+      psiJB[5,t] <- 1-psiJB[1,t]-psiJB[2,t]-psiJB[3,t]-psiJB[4,t]
+      psiMI[5,t] <- 1-psiMI[1,t]-psiMI[2,t]-psiMI[3,t]-psiMI[4,t]
+      psiAR[5,t] <- 1-psiAR[1,t]-psiAR[2,t]-psiAR[3,t]-psiAR[4,t]
+      psiUN[5,t] <- 1-psiUN[1,t]-psiUN[2,t]-psiUN[3,t]-psiUN[4,t]
+    }
+
+# Define state-transition and observation matrices 	
+for (i in 1:nind){
+   # Define probabilities of state S(t+1) given S(t)
+   for (t in f[i]:(n.occasions-1)){
+      ps[1,i,t,1] <- 0
+      ps[1,i,t,2] <- phiDB[t] * psiDB[2,t]
+      ps[1,i,t,3] <- phiDB[t] * psiDB[3,t]
+      ps[1,i,t,4] <- 0
+      ps[1,i,t,5] <- phiDB[t] * psiDB[5,t]
+      ps[1,i,t,6] <- 1-phiDB[t]
+      
+      ps[2,i,t,1] <- 0
+      ps[2,i,t,2] <- 0
+      ps[2,i,t,3] <- 0
+      ps[2,i,t,4] <- phiJB[t] * psiJB[4,t]
+      ps[2,i,t,5] <- phiJB[t] * psiJB[5,t]
+      ps[2,i,t,6] <- 1-phiJB[t]
+      
+      ps[3,i,t,1] <- 0
+      ps[3,i,t,2] <- 0
+      ps[3,i,t,3] <- 0
+      ps[3,i,t,4] <- phiMI[t] * psiMI[4,t]
+      ps[3,i,t,5] <- phiMI[t] * psiMI[5,t]
+      ps[3,i,t,6] <- 1-phiMI[t]
+      
+      ps[4,i,t,1] <- phiAR[t] * psiAR[1,t]
+      ps[4,i,t,2] <- 0
+      ps[4,i,t,3] <- 0
+      ps[4,i,t,4] <- 0
+      ps[4,i,t,5] <- phiAR[t] * psiAR[5,t]
+      ps[4,i,t,6] <- 1-phiAR[t]
+      
+      ps[5,i,t,1] <- phiUN[t] * psiUN[1,t]
+      ps[5,i,t,2] <- phiUN[t] * psiUN[2,t]
+      ps[5,i,t,3] <- phiUN[t] * psiUN[3,t]
+      ps[5,i,t,4] <- phiUN[t] * psiUN[4,t]
+      ps[5,i,t,5] <- phiUN[t] * psiUN[5,t]
+      ps[5,i,t,6] <- 1-phiUN[t]     
+      
+      ps[6,i,t,1] <- 0
+      ps[6,i,t,2] <- 0
+      ps[6,i,t,3] <- 0
+      ps[6,i,t,4] <- 0
+      ps[6,i,t,5] <- 0
+      ps[6,i,t,6] <- 1
+
+      # Define probabilities of O(t) given S(t)
+      po[1,i,t,1] <- pDB[t]
+      po[1,i,t,2] <- 0
+      po[1,i,t,3] <- 0
+      po[1,i,t,4] <- 0
+      po[1,i,t,5] <- 1-pDB[t]
+      
+      po[2,i,t,1] <- 0
+      po[2,i,t,2] <- pJB[t]
+      po[2,i,t,3] <- 0
+      po[2,i,t,4] <- 0
+      po[2,i,t,5] <- 1-pJB[t]
+      
+      po[3,i,t,1] <- 0
+      po[3,i,t,2] <- 0
+      po[3,i,t,3] <- pMI[t]
+      po[3,i,t,4] <- 0
+      po[3,i,t,5] <- 1-pMI[t]
+      
+      po[4,i,t,1] <- 0
+      po[4,i,t,2] <- 0
+      po[4,i,t,3] <- 0
+      po[4,i,t,4] <- pAR[t]
+      po[4,i,t,5] <- 1-pAR[t]
+      
+      po[5,i,t,1] <- 0
+      po[5,i,t,2] <- 0
+      po[5,i,t,3] <- 0
+      po[5,i,t,4] <- 0
+      po[5,i,t,5] <- 1
+      
+      po[6,i,t,1] <- 0
+      po[6,i,t,2] <- 0
+      po[6,i,t,3] <- 0
+      po[6,i,t,4] <- 0
+      po[6,i,t,5] <- 1
+      } #t
+   } #i
+
+# Likelihood 
+for (i in 1:nind){
+   # Define latent state at first capture   
+   z[i,f[i]] <- y[i,f[i]]
+   for (t in (f[i]+1):n.occasions){
+      # State process: draw S(t) given S(t-1)
+      z[i,t] ~ dcat(ps[z[i,t-1], i, t-1,])
+      # Observation process: draw O(t) given S(t)
+      y[i,t] ~ dcat(po[z[i,t], i, t-1,])
+      } #t
+   } #i
+}
+",fill = TRUE)
+sink()
+
+```
+
+## Running the model
+
+Then gather the data for JAGS (use the function from Kery and Schaub to get known values for the true state *z*) and define a couple new functions to create initial values for the true state *z* and for *psi*. These both need to be matrices - for *z* it's the same dimensions as the encounter history matrix with NAs where known values are because we don't need to estimate those (can supply them as data), but the values we do fill in need to follow transitions defined as possible in the model (i.e. Delaware Bay to James Bay but not vice versa). For *psi* a matrix with a starting value between 0 and 1 for each state (dimension 1) at each occasion (dimension 2).
+
+Then list the parameters to estimate, the settings for MCMC estimation and finally call JAGS to run the model using the simulated data.
+
+```{r, eval = FALSE}
+# function to get known values for z
+known.state.ms <- function(ms, notseen){
+  # notseen: label for “not seen”
+  state <- ms
+  state[state==notseen] <- NA
+  for (i in 1:dim(ms)[1]){
+    m <- min(which(!is.na(state[i,])))
+    state[i,m] <- NA
+  }
+  return(state)
+}
+
+# Bundle data
+jags.data <- list(y = rCH, f = f, n.occasions = dim(rCH)[2], nind = dim(rCH)[1], z = known.state.ms(rCH, 5))
+
+# function for initial z values so they follow annual cycle
+mod.init.z2 <- function(ch, notseen){
+  z.known <- ch # get known states
+  z.known[z.known==notseen] <- NA
+  z.init <- matrix(NA, ncol = dim(rCH)[1], nrow = n.occasions)
+  z.init[1:dim(z.init)[1],] <- rep(c(1, 2, 4), n.occasions/3)
+  z.init <- t(z.init)
+  z.init[!is.na(z.known)] <- NA # replace known values with NA
+  for (i in 1:dim(z.init)[1]){z.init[i,1:f[i]] <- NA}
+  return(z.init)
+}
+
+# Function to create initial values for psi
+init.psi <- function(cols){
+  psi.array <- array(NA,dim=c(cols,n.occasions-1))
+  for (i in 1:cols){
+    for (t in 1:(n.occasions-1)){
+      psi.array[i,t] <- rnorm(1)
+    } #t
+  } #i
+  return(psi.array)
+}
+
+# Initial values 
+inits <- function(){list(mean.phi = runif(5, 0, 1),
+                         lpsiDB = init.psi(4), lpsiJB = init.psi(4), lpsiMI = init.psi(4), lpsiAR = init.psi(4),
+                         lpsiUN = init.psi(4),
+                         mean.pDB = runif(1, 0, 1), mean.pJB = runif(1, 0, 1), mean.pMI = runif(1, 0, 1),
+                         mean.pAR = runif(1, 0, 1),
+                         sigmaDB = runif(1, 0, 1), sigmaJB = runif(1, 0, 1), sigmaMI = runif(1, 0, 1),
+                         sigmaAR = runif(1, 0, 1),
+                         z = mod.init.z2(rCH, 5))} 
+
+
+# Parameters monitored
+parameters <- c("mean.phi",
+                "psiDB", "psiJB", "psiMI", "psiAR", "psiUN",
+                "pDB","mean.pDB", "sigma2DB",
+                "pJB", "mean.pJB", "sigma2JB",
+                "pMI", "mean.pMI", "sigma2MI",
+                "pAR", "mean.pAR", "sigma2AR")
+
+# MCMC settings
+ni <- 100000 # iterations
+nt <- 5      # thin by
+nb <- 50000  # burn-in
+nc <- 3      # chains
+
+# Call JAGS from R (BRT 56 min)
+rekn.ms <- jags(jags.data, inits, parameters, "simulation_scenarios.jags",
+                n.chains = nc, n.thin = nt, n.iter = ni, n.burnin = nb, parallel = TRUE)
+
+print(rekn.ms, digits = 3)
+
+```
+
+## Plotting model output
+
+### Estimated parameters against known values
